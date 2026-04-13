@@ -1,0 +1,23 @@
+{
+  "name": "airguard5be",
+  "version": "1.0.0",
+  "description": "Backend do Airguard com MQTT, MongoDB Atlas + API HTTP",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "dotenv": "^17.4.1",
+    "express": "^5.2.1",
+    "mongodb": "^7.1.1",
+    "mqtt": "^5.15.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.14"
+  }
+}
