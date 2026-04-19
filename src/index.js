@@ -39,9 +39,11 @@ function requireApiKey(req, res, next) {
 app.use("/api", requireApiKey);
 
 const mongoClient = new MongoClient(MONGODB_URI);
+
 let db;
 let telemetryCollection;
 let eventsCollection;
+let mqttClient = null;
 
 const runtime = {
   mqttConnected: false,
@@ -54,8 +56,8 @@ const runtime = {
 };
 
 function parseTopic(topic) {
-  // Esperado: v1/CLI-001/MATRIZ/COZINHA/SN-CO-001
   const parts = topic.split("/");
+
   if (parts.length !== 5 || parts[0] !== "v1") {
     return null;
   }
@@ -76,6 +78,7 @@ function toNumberOrNull(value) {
 
 function normalizePayload(topic, payload) {
   const topicInfo = parseTopic(topic);
+
   if (!topicInfo) {
     throw new Error(`Tópico inválido: ${topic}`);
   }
@@ -119,26 +122,29 @@ function normalizePayload(topic, payload) {
 
 async function connectMongo() {
   await mongoClient.connect();
+
   db = mongoClient.db(MONGODB_DB);
   telemetryCollection = db.collection("telemetria");
   eventsCollection = db.collection("eventos");
 
   await telemetryCollection.createIndex({ sensor_id: 1, received_at: -1 });
-  await telemetryCollection.createIndex({ status: 1, received_at: -1 });
+  await telemetryCollection.createIndex({ cliente: 1, received_at: -1 });
   await telemetryCollection.createIndex({ cliente: 1, unidade: 1, ambiente: 1, received_at: -1 });
+  await telemetryCollection.createIndex({ status: 1, received_at: -1 });
 
   await eventsCollection.createIndex({ sensor_id: 1, created_at: -1 });
+  await eventsCollection.createIndex({ cliente: 1, created_at: -1 });
 
   runtime.mongoConnected = true;
   console.log("MongoDB conectado.");
 }
 
 function connectMqtt() {
-  const mqttClient = mqtt.connect(MQTT_URL, {
+  mqttClient = mqtt.connect(MQTT_URL, {
     username: MQTT_USERNAME,
     password: MQTT_PASSWORD,
     reconnectPeriod: 5000,
-    connectTimeout: 30_000,
+    connectTimeout: 30000,
     clean: true
   });
 
@@ -208,6 +214,9 @@ function connectMqtt() {
       if (previous?.status && previous.status !== doc.status) {
         await eventsCollection.insertOne({
           sensor_id: doc.sensor_id,
+          cliente: doc.cliente,
+          unidade: doc.unidade,
+          ambiente: doc.ambiente,
           tipo: "TRANSICAO_ESTADO",
           de: previous.status,
           para: doc.status,
@@ -223,8 +232,23 @@ function connectMqtt() {
       console.error("Erro ao salvar no MongoDB:", err.message);
     }
   });
+}
 
-  return mqttClient;
+function buildDashboardFilter(query = {}) {
+  const filter = {};
+
+  if (query.cliente) filter.cliente = query.cliente;
+  if (query.sensor_id) filter.sensor_id = query.sensor_id;
+  if (query.ambiente) filter.ambiente = query.ambiente;
+  if (query.unidade) filter.unidade = query.unidade;
+  if (query.status) filter.status = query.status;
+
+  if (query.minutes) {
+    const minutes = Math.min(Number(query.minutes) || 60, 7 * 24 * 60);
+    filter.received_at = { $gte: new Date(Date.now() - minutes * 60 * 1000) };
+  }
+
+  return filter;
 }
 
 app.get("/health", async (_req, res) => {
@@ -240,95 +264,212 @@ app.get("/health", async (_req, res) => {
   });
 });
 
-app.get("/api/latest/:sensorId", async (req, res) => {
-  const { sensorId } = req.params;
+app.get("/api/sensors", async (_req, res) => {
+  try {
+    const pipeline = [
+      { $sort: { received_at: -1 } },
+      {
+        $group: {
+          _id: "$sensor_id",
+          sensor_id: { $first: "$sensor_id" },
+          cliente: { $first: "$cliente" },
+          unidade: { $first: "$unidade" },
+          ambiente: { $first: "$ambiente" },
+          profile: { $first: "$profile" },
+          status: { $first: "$status" },
+          last_seen: { $first: "$received_at" }
+        }
+      },
+      { $sort: { cliente: 1, unidade: 1, ambiente: 1, sensor_id: 1 } }
+    ];
 
-  const doc = await telemetryCollection.findOne(
-    { sensor_id: sensorId },
-    { sort: { received_at: -1 } }
-  );
+    const items = await telemetryCollection.aggregate(pipeline).toArray();
 
-  if (!doc) {
-    return res.status(404).json({ error: "Sensor não encontrado." });
+    res.json({
+      count: items.length,
+      items
+    });
+  } catch (err) {
+    res.status(500).json({ error: "Erro ao listar sensores.", detail: err.message });
   }
+});
 
-  res.json(doc);
+app.get("/api/overview", async (req, res) => {
+  try {
+    const match = buildDashboardFilter(req.query);
+
+    const pipeline = [
+      { $match: match },
+      { $sort: { received_at: -1 } },
+      {
+        $group: {
+          _id: "$sensor_id",
+          sensor_id: { $first: "$sensor_id" },
+          cliente: { $first: "$cliente" },
+          unidade: { $first: "$unidade" },
+          ambiente: { $first: "$ambiente" },
+          profile: { $first: "$profile" },
+          status: { $first: "$status" },
+          temp_c: { $first: "$temp_c" },
+          umid_pct: { $first: "$umid_pct" },
+          co_ppm: { $first: "$leitura.co_ppm" },
+          metano_ppm: { $first: "$leitura.metano_ppm" },
+          presenca: { $first: "$presenca" },
+          last_seen: { $first: "$received_at" }
+        }
+      },
+      { $sort: { cliente: 1, unidade: 1, ambiente: 1, sensor_id: 1 } }
+    ];
+
+    const items = await telemetryCollection.aggregate(pipeline).toArray();
+
+    res.json({
+      count: items.length,
+      items
+    });
+  } catch (err) {
+    res.status(500).json({ error: "Erro ao gerar overview.", detail: err.message });
+  }
+});
+
+app.get("/api/latest/:sensorId", async (req, res) => {
+  try {
+    const { sensorId } = req.params;
+
+    const doc = await telemetryCollection.findOne(
+      { sensor_id: sensorId },
+      { sort: { received_at: -1 } }
+    );
+
+    if (!doc) {
+      return res.status(404).json({ error: "Sensor não encontrado." });
+    }
+
+    res.json(doc);
+  } catch (err) {
+    res.status(500).json({ error: "Erro ao buscar última leitura.", detail: err.message });
+  }
 });
 
 app.get("/api/history/:sensorId", async (req, res) => {
-  const { sensorId } = req.params;
-  const limit = Math.min(Number(req.query.limit) || 100, 1000);
+  try {
+    const { sensorId } = req.params;
+    const limit = Math.min(Number(req.query.limit) || 100, 1000);
 
-  const docs = await telemetryCollection
-    .find({ sensor_id: sensorId })
-    .sort({ received_at: -1 })
-    .limit(limit)
-    .toArray();
+    const docs = await telemetryCollection
+      .find({ sensor_id: sensorId })
+      .sort({ received_at: -1 })
+      .limit(limit)
+      .toArray();
 
-  res.json({
-    sensor_id: sensorId,
-    count: docs.length,
-    items: docs
-  });
+    res.json({
+      sensor_id: sensorId,
+      count: docs.length,
+      items: docs
+    });
+  } catch (err) {
+    res.status(500).json({ error: "Erro ao buscar histórico.", detail: err.message });
+  }
 });
 
 app.get("/api/events/:sensorId", async (req, res) => {
-  const { sensorId } = req.params;
-  const limit = Math.min(Number(req.query.limit) || 100, 500);
+  try {
+    const { sensorId } = req.params;
+    const limit = Math.min(Number(req.query.limit) || 100, 500);
 
-  const docs = await eventsCollection
-    .find({ sensor_id: sensorId })
-    .sort({ created_at: -1 })
-    .limit(limit)
-    .toArray();
+    const docs = await eventsCollection
+      .find({ sensor_id: sensorId })
+      .sort({ created_at: -1 })
+      .limit(limit)
+      .toArray();
 
-  res.json({
-    sensor_id: sensorId,
-    count: docs.length,
-    items: docs
-  });
+    res.json({
+      sensor_id: sensorId,
+      count: docs.length,
+      items: docs
+    });
+  } catch (err) {
+    res.status(500).json({ error: "Erro ao buscar eventos.", detail: err.message });
+  }
 });
 
 app.get("/api/stats/:sensorId", async (req, res) => {
-  const { sensorId } = req.params;
-  const minutes = Math.min(Number(req.query.minutes) || 60, 7 * 24 * 60);
-  const since = new Date(Date.now() - minutes * 60 * 1000);
+  try {
+    const { sensorId } = req.params;
+    const minutes = Math.min(Number(req.query.minutes) || 60, 7 * 24 * 60);
+    const since = new Date(Date.now() - minutes * 60 * 1000);
 
-  const pipeline = [
-    {
-      $match: {
-        sensor_id: sensorId,
-        received_at: { $gte: since }
+    const statsPipeline = [
+      {
+        $match: {
+          sensor_id: sensorId,
+          received_at: { $gte: since }
+        }
+      },
+      { $sort: { received_at: 1 } },
+      {
+        $group: {
+          _id: "$sensor_id",
+          total: { $sum: 1 },
+          avg_temp_c: { $avg: "$temp_c" },
+          min_temp_c: { $min: "$temp_c" },
+          max_temp_c: { $max: "$temp_c" },
+          avg_umid_pct: { $avg: "$umid_pct" },
+          min_umid_pct: { $min: "$umid_pct" },
+          max_umid_pct: { $max: "$umid_pct" },
+          avg_co_ppm: { $avg: "$leitura.co_ppm" },
+          min_co_ppm: { $min: "$leitura.co_ppm" },
+          max_co_ppm: { $max: "$leitura.co_ppm" },
+          avg_gas_ppm: { $avg: "$leitura.metano_ppm" },
+          min_gas_ppm: { $min: "$leitura.metano_ppm" },
+          max_gas_ppm: { $max: "$leitura.metano_ppm" },
+          last_status: { $last: "$status" },
+          first_seen: { $first: "$received_at" },
+          last_seen: { $last: "$received_at" }
+        }
       }
-    },
-    {
-      $group: {
-        _id: "$sensor_id",
-        total: { $sum: 1 },
-        avg_temp_c: { $avg: "$temp_c" },
-        avg_umid_pct: { $avg: "$umid_pct" },
-        avg_co_ppm: { $avg: "$leitura.co_ppm" },
-        max_co_ppm: { $max: "$leitura.co_ppm" },
-        avg_gas_ppm: { $avg: "$leitura.metano_ppm" },
-        max_gas_ppm: { $max: "$leitura.metano_ppm" },
-        last_status: { $last: "$status" }
+    ];
+
+    const statusCountPipeline = [
+      {
+        $match: {
+          sensor_id: sensorId,
+          received_at: { $gte: since }
+        }
+      },
+      {
+        $group: {
+          _id: "$status",
+          total: { $sum: 1 }
+        }
       }
-    }
-  ];
+    ];
 
-  const result = await telemetryCollection.aggregate(pipeline).toArray();
+    const [statsResult, statusResult] = await Promise.all([
+      telemetryCollection.aggregate(statsPipeline).toArray(),
+      telemetryCollection.aggregate(statusCountPipeline).toArray()
+    ]);
 
-  res.json({
-    sensor_id: sensorId,
-    since,
-    stats: result[0] ?? null
-  });
+    const statusCounts = statusResult.reduce((acc, item) => {
+      acc[item._id || "DESCONHECIDO"] = item.total;
+      return acc;
+    }, {});
+
+    res.json({
+      sensor_id: sensorId,
+      since,
+      stats: statsResult[0] ?? null,
+      status_counts: statusCounts
+    });
+  } catch (err) {
+    res.status(500).json({ error: "Erro ao calcular estatísticas.", detail: err.message });
+  }
 });
 
-app.post("/api/command", async (req, res) => {
+app.post("/api/command", async (_req, res) => {
   res.status(501).json({
     error: "Ainda não implementado.",
-    hint: "Depois eu te passo a rota que publica comandos MQTT no tópico /cmd."
+    hint: "A próxima release pode publicar comandos MQTT no tópico /cmd."
   });
 });
 
