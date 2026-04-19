@@ -1,5 +1,6 @@
 import dotenv from "dotenv";
 import express from "express";
+import cors from "cors";
 import mqtt from "mqtt";
 import { MongoClient } from "mongodb";
 
@@ -19,11 +20,15 @@ const {
 if (!MONGODB_URI) {
   throw new Error("MONGODB_URI não definido.");
 }
+
 if (!MQTT_URL || !MQTT_USERNAME || !MQTT_PASSWORD) {
   throw new Error("MQTT_URL, MQTT_USERNAME e MQTT_PASSWORD são obrigatórios.");
 }
 
 const app = express();
+
+// CORS liberado para o dashboard consumir a API
+app.use(cors());
 app.use(express.json());
 
 function requireApiKey(req, res, next) {
@@ -33,6 +38,7 @@ function requireApiKey(req, res, next) {
   if (incoming !== API_KEY) {
     return res.status(401).json({ error: "Não autorizado." });
   }
+
   next();
 }
 
