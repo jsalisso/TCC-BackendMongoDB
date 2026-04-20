@@ -360,6 +360,64 @@ app.get("/api/latest/:sensorId", async (req, res) => {
 app.get("/api/history/:sensorId", async (req, res) => {
   try {
     const { sensorId } = req.params;
+
+    const limit = Math.min(Number(req.query.limit) || 50, 1000);
+    const page = Math.max(Number(req.query.page) || 1, 1);
+    const skip = (page - 1) * limit;
+
+    const filter = { sensor_id: sensorId };
+
+    if (req.query.start || req.query.end) {
+      filter.received_at = {};
+
+      if (req.query.start) {
+        const startDate = new Date(req.query.start);
+        if (isNaN(startDate.getTime())) {
+          return res.status(400).json({ error: "Parâmetro start inválido." });
+        }
+        filter.received_at.$gte = startDate;
+      }
+
+      if (req.query.end) {
+        const endDate = new Date(req.query.end);
+        if (isNaN(endDate.getTime())) {
+          return res.status(400).json({ error: "Parâmetro end inválido." });
+        }
+        filter.received_at.$lte = endDate;
+      }
+    }
+
+    const [total, docs] = await Promise.all([
+      telemetryCollection.countDocuments(filter),
+      telemetryCollection
+        .find(filter)
+        .sort({ received_at: -1 })
+        .skip(skip)
+        .limit(limit)
+        .toArray()
+    ]);
+
+    const totalPages = Math.ceil(total / limit);
+
+    res.json({
+      sensor_id: sensorId,
+      count: docs.length,
+      total,
+      page,
+      limit,
+      totalPages,
+      start: req.query.start || null,
+      end: req.query.end || null,
+      items: docs
+    });
+  } catch (err) {
+    res.status(500).json({ error: "Erro ao buscar histórico.", detail: err.message });
+  }
+});
+
+/* app.get("/api/history/:sensorId", async (req, res) => {
+  try {
+    const { sensorId } = req.params;
     const limit = Math.min(Number(req.query.limit) || 100, 1000);
 
     const filter = { sensor_id: sensorId };
@@ -400,7 +458,7 @@ app.get("/api/history/:sensorId", async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: "Erro ao buscar histórico.", detail: err.message });
   }
-});
+}); */
 
 /* app.get("/api/history/:sensorId", async (req, res) => {
   try {
