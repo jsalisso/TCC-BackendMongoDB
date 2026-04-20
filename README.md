@@ -210,14 +210,6 @@ API_KEY=
 * Eventos são gerados automaticamente quando há mudança de status
 * API pronta para consumo por dashboards e aplicações externas
 
----
-
-## 👨‍💻 Autor
-
-Projeto desenvolvido como parte de:
-
-* Projeto Integrador V
-* Trabalho de Conclusão de Curso (TCC)
 
 ---
 

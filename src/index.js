@@ -4,6 +4,8 @@ import cors from "cors";
 import mqtt from "mqtt";
 import { MongoClient } from "mongodb";
 
+// Carrega variáveis de ambiente do arquivo .env
+
 dotenv.config();
 
 const {
