@@ -79,6 +79,42 @@ function parseTopic(topic) {
   };
 }
 
+async function calculateStats(filter) {
+  const statsPipeline = [
+    { $match: filter },
+    { $sort: { received_at: 1 } },
+    {
+      $group: {
+        _id: "$sensor_id",
+        total: { $sum: 1 },
+
+        avg_temp_c: { $avg: "$temp_c" },
+        min_temp_c: { $min: "$temp_c" },
+        max_temp_c: { $max: "$temp_c" },
+
+        avg_umid_pct: { $avg: "$umid_pct" },
+        min_umid_pct: { $min: "$umid_pct" },
+        max_umid_pct: { $max: "$umid_pct" },
+
+        avg_co_ppm: { $avg: "$leitura.co_ppm" },
+        min_co_ppm: { $min: "$leitura.co_ppm" },
+        max_co_ppm: { $max: "$leitura.co_ppm" },
+
+        avg_gas_ppm: { $avg: "$leitura.metano_ppm" },
+        min_gas_ppm: { $min: "$leitura.metano_ppm" },
+        max_gas_ppm: { $max: "$leitura.metano_ppm" },
+
+        last_status: { $last: "$status" },
+        first_seen: { $first: "$received_at" },
+        last_seen: { $last: "$received_at" }
+      }
+    }
+  ];
+
+  const result = await telemetryCollection.aggregate(statsPipeline).toArray();
+  return result[0] || null;
+}
+
 function toNumberOrNull(value) {
   const num = Number(value);
   return Number.isFinite(num) ? num : null;
@@ -504,76 +540,71 @@ app.get("/api/events/:sensorId", async (req, res) => {
   }
 });
 
+app.get("/api/stats-range/:sensorId", async (req, res) => {
+  try {
+    const { sensorId } = req.params;
+
+    const filter = { sensor_id: sensorId };
+
+    if (req.query.start || req.query.end) {
+      filter.received_at = {};
+
+      if (req.query.start) {
+        const startDate = new Date(req.query.start);
+        if (isNaN(startDate.getTime())) {
+          return res.status(400).json({ error: "Parâmetro start inválido." });
+        }
+        filter.received_at.$gte = startDate;
+      }
+
+      if (req.query.end) {
+        const endDate = new Date(req.query.end);
+        if (isNaN(endDate.getTime())) {
+          return res.status(400).json({ error: "Parâmetro end inválido." });
+        }
+        filter.received_at.$lte = endDate;
+      }
+    }
+
+    const stats = await calculateStats(filter);
+
+    res.json({
+      sensor_id: sensorId,
+      start: req.query.start || null,
+      end: req.query.end || null,
+      stats
+    });
+  } catch (err) {
+    res.status(500).json({
+      error: "Erro ao calcular estatísticas por período.",
+      detail: err.message
+    });
+  }
+});
+
 app.get("/api/stats/:sensorId", async (req, res) => {
   try {
     const { sensorId } = req.params;
     const minutes = Math.min(Number(req.query.minutes) || 60, 7 * 24 * 60);
     const since = new Date(Date.now() - minutes * 60 * 1000);
 
-    const statsPipeline = [
-      {
-        $match: {
-          sensor_id: sensorId,
-          received_at: { $gte: since }
-        }
-      },
-      { $sort: { received_at: 1 } },
-      {
-        $group: {
-          _id: "$sensor_id",
-          total: { $sum: 1 },
-          avg_temp_c: { $avg: "$temp_c" },
-          min_temp_c: { $min: "$temp_c" },
-          max_temp_c: { $max: "$temp_c" },
-          avg_umid_pct: { $avg: "$umid_pct" },
-          min_umid_pct: { $min: "$umid_pct" },
-          max_umid_pct: { $max: "$umid_pct" },
-          avg_co_ppm: { $avg: "$leitura.co_ppm" },
-          min_co_ppm: { $min: "$leitura.co_ppm" },
-          max_co_ppm: { $max: "$leitura.co_ppm" },
-          avg_gas_ppm: { $avg: "$leitura.metano_ppm" },
-          min_gas_ppm: { $min: "$leitura.metano_ppm" },
-          max_gas_ppm: { $max: "$leitura.metano_ppm" },
-          last_status: { $last: "$status" },
-          first_seen: { $first: "$received_at" },
-          last_seen: { $last: "$received_at" }
-        }
-      }
-    ];
+    const filter = {
+      sensor_id: sensorId,
+      received_at: { $gte: since }
+    };
 
-    const statusCountPipeline = [
-      {
-        $match: {
-          sensor_id: sensorId,
-          received_at: { $gte: since }
-        }
-      },
-      {
-        $group: {
-          _id: "$status",
-          total: { $sum: 1 }
-        }
-      }
-    ];
-
-    const [statsResult, statusResult] = await Promise.all([
-      telemetryCollection.aggregate(statsPipeline).toArray(),
-      telemetryCollection.aggregate(statusCountPipeline).toArray()
-    ]);
-
-    const statusCounts = statusResult.reduce((acc, item) => {
-      acc[item._id || "DESCONHECIDO"] = item.total;
-      return acc;
-    }, {});
+    const stats = await calculateStats(filter);
 
     res.json({
       sensor_id: sensorId,
       since,
-      stats: statsResult[0] ?? null,
-      status_counts: statusCounts
+      stats
     });
   } catch (err) {
-    res.status(500).json({ error: "Erro ao calcular estatísticas.", detail: err.message });
+    res.status(500).json({
+      error: "Erro ao calcular estatísticas.",
+      detail: err.message
+    });
   }
 });
 
